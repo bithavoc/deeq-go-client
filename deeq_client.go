@@ -9,6 +9,7 @@ import (
     "strings"
     "encoding/json"
     "math/rand"
+    "strconv"
 )
 
 const (
@@ -28,12 +29,14 @@ func NewClient(token id.Token) *Client {
     return c
 }
 
-func (client *Client)perform(path string, form url.Values, resultObject interface{}) (resp *http.Response, err error) {
-    req, err := http.NewRequest("POST", fmt.Sprintf("%s/%s", baseURL, path), strings.NewReader(form.Encode()))
+func (client *Client)perform(method string, path string, form url.Values, resultObject interface{}) (resp *http.Response, err error) {
+    req, err := http.NewRequest(method, fmt.Sprintf("%s/%s", baseURL, path), strings.NewReader(form.Encode()))
     if err != nil {
         return nil, err
     }
-    req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+    if method != "GET" {
+        req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+    }
     req.Header.Add("X-BITHAVOC-TOKEN", client.token.Code)
     resp, err = client.client.Do(req)
     if err != nil {
@@ -46,6 +49,7 @@ func (client *Client)perform(path string, form url.Values, resultObject interfac
         }
     }()
     resultData, err := ioutil.ReadAll(resp.Body)
+    //fmt.Println(string(resultData))
     err = json.Unmarshal(resultData, &resultObject)
     if err != nil {
         return nil, err
@@ -67,24 +71,94 @@ func randInt(min int, max int) int {
     return min + rand.Intn(max-min)
 }
 func NewTaskId() TaskId {
-    return TaskId(randomString(10))
+    return TaskId(strings.ToLower(randomString(10)))
 }
 
-type setTaskResult struct {
-    Task_Id string
+type baseResult struct {
+    Message string
+}
+
+const (
+    TaskStatusIncomplete int = 0
+    TaskStatusComplete= 1
+)
+
+type Task struct {
+    Id TaskId `json:"task_id"`
     Text string
+    Status int
+    Deleted bool
 }
 
-func (client *Client) SetTask(tid TaskId, text string) (error) {
+type taskResult struct {
+    baseResult
+    Task Task
+}
+
+func (task *Task)ToForm() url.Values {
     form :=  url.Values{}
-    form.Set("task_id", string(tid))
-    form.Set("text", text)
-
-    resultObject := setTaskResult{}
-    _, err := client.perform("tasks", form, &resultObject)
-    if err != nil {
-        return err
+    form.Set("task_id", string(task.Id))
+    form.Set("text", task.Text)
+    form.Set("status", strconv.Itoa(task.Status))
+    if task.Deleted {
+        form.Set("deleted", "true")
+    } else {
+        form.Set("deleted", "false")
     }
-    return nil
+    return form
 }
 
+type DeeqError struct {
+    msg string
+}
+
+func (de *DeeqError)Error() string {
+    return de.msg
+}
+
+func (client *Client) SetTask(task *Task) (*Task, error) {
+    form := task.ToForm()
+    resultObject := taskResult{}
+    _, err := client.perform("POST", "tasks", form, &resultObject)
+    if err != nil {
+        return nil, err
+    }
+    if resultObject.Message != "" {
+        return nil, &DeeqError{resultObject.Message}
+    }
+    return &resultObject.Task, nil
+}
+
+func (client *Client) GetTask(tid TaskId) (*Task, error) {
+    resultObject := taskResult{}
+    _, err := client.perform("GET", "tasks/" + string(tid), url.Values{}, &resultObject)
+    if err != nil {
+        return nil, err
+    }
+    if resultObject.Message != "" {
+        return nil, &DeeqError{resultObject.Message}
+    }
+    return &resultObject.Task, nil
+}
+
+
+type listResult struct {
+    baseResult
+    Tasks []Task
+}
+
+func (client *Client) GetTasksInTags(rootTag string, childTag string) ([]Task, error) {
+    if strings.HasPrefix(rootTag, "#") {
+        rootTag = rootTag[1:]
+    }
+
+    resultObject := listResult{}
+    _, err := client.perform("GET", fmt.Sprintf("tag/%s/tasks", rootTag), url.Values{}, &resultObject)
+    if err != nil {
+        return nil, err
+    }
+    if resultObject.Message != "" {
+        return nil, &DeeqError{resultObject.Message}
+    }
+    return resultObject.Tasks, nil
+}
