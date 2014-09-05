@@ -10,15 +10,30 @@ import (
     "encoding/json"
     "math/rand"
     "strconv"
+    "os"
+    "encoding/base64"
 )
 
-const (
-    baseURL = "http://127.0.0.1:9292"
-)
+func getBaseURL() string {
+    if os.Getenv("BH_ENV") != "" {
+        return "http://127.0.0.1:9292"
+    }
+    return "https://deeq.bithavoc.io"
+}
+
 
 type Client struct {
     client *http.Client
     token id.Token
+    ApplicationVersion string
+    ApplicationUpgrade UpgradeInfo
+    ApplicationUpgradeChanged func(client *Client)
+}
+
+type UpgradeInfo struct {
+    Available bool
+    Version string
+    Message string
 }
 
 func NewClient(token id.Token) *Client {
@@ -30,7 +45,7 @@ func NewClient(token id.Token) *Client {
 }
 
 func (client *Client)perform(method string, path string, form url.Values, resultObject interface{}) (resp *http.Response, err error) {
-    req, err := http.NewRequest(method, fmt.Sprintf("%s/%s", baseURL, path), strings.NewReader(form.Encode()))
+    req, err := http.NewRequest(method, fmt.Sprintf("%s/%s", getBaseURL(), path), strings.NewReader(form.Encode()))
     if err != nil {
         return nil, err
     }
@@ -38,10 +53,34 @@ func (client *Client)perform(method string, path string, form url.Values, result
         req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
     }
     req.Header.Add("X-BITHAVOC-TOKEN", client.token.Code)
+    if client.ApplicationVersion != "" {
+        req.Header.Add("X-DEEQ-VERSION", "name:CLI,version:" + client.ApplicationVersion)
+    }
     resp, err = client.client.Do(req)
     if err != nil {
         return nil, err
     }
+
+    if upgradeString := resp.Header.Get("X-DEEQ-UPGRADE"); upgradeString != "" {
+        upgradeInfo := strings.Split(upgradeString, ",")
+        latest := strings.Split(upgradeInfo[0], ":")[1]
+        message := strings.Split(upgradeInfo[1], ":")[1]
+        if data, err := base64.StdEncoding.DecodeString(message); err == nil {
+            message = string(data)
+        } else {
+            message = ""
+        }
+        client.ApplicationUpgrade = UpgradeInfo {
+            Available: true,
+            Version: latest,
+            Message: message,
+        }
+        if client.ApplicationUpgradeChanged != nil {
+            client.ApplicationUpgradeChanged(client)
+        }
+        //fmt.Printf("%+v", client.ApplicationUpgrade)
+    }
+
     body := resp.Body
     defer func() {
         if body != nil {
@@ -151,7 +190,6 @@ func (client *Client) GetTasksInTags(rootTag string, childTag string) ([]Task, e
     if strings.HasPrefix(rootTag, "#") {
         rootTag = rootTag[1:]
     }
-
     resultObject := listResult{}
     _, err := client.perform("GET", fmt.Sprintf("tag/%s/tasks", rootTag), url.Values{}, &resultObject)
     if err != nil {
